@@ -1,0 +1,25 @@
+# Python virtual environment (each machine builds its own from requirements.txt)
+.venv/
+
+# Python bytecode caches, regenerated automatically
+__pycache__/
+*.pyc
+
+# Recordings and test videos (large binary files)
+*.mp4
+*.avi
+*.mkv
+*.mov
+recordings/
+
+# Downloaded MediaPipe model files
+*.task
+
+# Editor / OS clutter
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Blender autosave backups
+*.blend1
