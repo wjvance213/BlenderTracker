@@ -1,0 +1,15 @@
+# Body Tracker settings. Read by Python with the built-in tomllib module.
+# Edit values here instead of changing code.
+
+[camera]
+# Matched against DirectShow device names (see pygrabber's device list).
+name = "Brio 101"
+# 720p is plenty for landmark models and keeps the tracking fast.
+width = 1280
+height = 720
+fps = 30
+
+[udp]
+# Where the Blender add-on listens. 127.0.0.1 = this same PC.
+host = "127.0.0.1"
+port = 9100
