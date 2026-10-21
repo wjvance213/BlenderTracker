@@ -23,3 +23,6 @@ desktop.ini
 
 # Blender autosave backups
 *.blend1
+
+# Personal notes and context files (kept local only)
+project_planning/

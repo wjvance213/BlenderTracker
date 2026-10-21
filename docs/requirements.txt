@@ -1,5 +1,15 @@
-opencv-python
-numpy
-mediapipe
-ultralytics
-pygrabber
+# Install with: pip install -r docs\requirements.txt  (venv active, Python 3.13)
+
+# OpenCV: camera capture + viewer windows. The "contrib" build, because
+# mediapipe depends on it; installing plain opencv-python too would give two
+# packages fighting over the same cv2 folder.
+opencv-contrib-python==5.0.0.93
+
+# Hand + pose landmark models (MediaPipe Tasks API)
+mediapipe==1.1.1
+
+# Arrays; OpenCV frames are numpy arrays
+numpy==2.5.4
+
+# Lists DirectShow camera names so we can pick cameras by name
+pygrabber==0.2
