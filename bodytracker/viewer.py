@@ -1,4 +1,5 @@
-"""Tiled OpenCV viewer: every stream in one window, each tile labelled with its name and FPS."""
+"""Tiled OpenCV viewer: every stream in one window, each tile labelled with its name and FPS,
+with tracking results drawn on top."""
 
 import time
 
@@ -6,6 +7,8 @@ import cv2
 import numpy as np
 
 from bodytracker.camera import CameraStream, VideoFileStream
+from bodytracker.overlay import draw_result
+from bodytracker.trackers import trackers_from_config
 
 WINDOW_NAME = "Body Tracker"
 TILE_WIDTH = 640
@@ -48,8 +51,8 @@ def _draw_label(image, text, position):
     cv2.putText(image, text, position, font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def make_tile(frame, name, fps):
-    """Return a TILE_WIDTH x TILE_HEIGHT image of `frame` with its name and fps drawn on top."""
+def make_tile(frame, name, fps, results=(), track_ms=None):
+    """Return a TILE_WIDTH x TILE_HEIGHT image of `frame` with tracking results, name and fps on top."""
     if frame is None:
         tile = np.zeros((TILE_HEIGHT, TILE_WIDTH, 3), dtype=np.uint8)
         _draw_label(tile, "waiting for frames...", (20, TILE_HEIGHT // 2))
@@ -57,7 +60,12 @@ def make_tile(frame, name, fps):
         # resize() returns a new image, so drawing on the tile never touches the
         # stream's own frame (which the reader thread may hand out again).
         tile = cv2.resize(frame, (TILE_WIDTH, TILE_HEIGHT), interpolation=cv2.INTER_AREA)
-    _draw_label(tile, f"{name}  {fps:.1f} fps", (10, 25))
+        for result in results:
+            draw_result(tile, result)
+    label = f"{name}  {fps:.1f} fps"
+    if track_ms is not None:
+        label += f"  track {track_ms:.0f} ms"
+    _draw_label(tile, label, (10, 25))
     return tile
 
 
@@ -73,15 +81,35 @@ def tile_grid(tiles):
     return np.vstack(rows)
 
 
-def show_streams(streams, names):
-    """Show all streams in one window until q, Esc, or the window's X is pressed."""
+def show_streams(streams, names, trackers_per_stream=None):
+    """Show all streams in one window until q, Esc, or the window's X is pressed.
+
+    trackers_per_stream holds one list of trackers for each stream (each stream needs its
+    own, because MediaPipe's video mode remembers the previous frame it was given).
+    """
+    if trackers_per_stream is None:
+        trackers_per_stream = [[] for _ in streams]
     meters = [FpsMeter() for _ in streams]
+    # Per stream: the timestamp last tracked, its results, and how long tracking took.
+    last_tracked = [None for _ in streams]
+    results = [[] for _ in streams]
+    track_ms = [None for _ in streams]
+
     while True:
         tiles = []
-        for stream, name, meter in zip(streams, names, meters):
+        for i, (stream, name, trackers) in enumerate(zip(streams, names, trackers_per_stream)):
             frame, timestamp = stream.read()
-            meter.update(timestamp)
-            tiles.append(make_tile(frame, name, meter.fps))
+            meters[i].update(timestamp)
+
+            # Track only new frames: MediaPipe rejects a repeated timestamp, and an old
+            # frame's results are still the right ones to draw on it.
+            if trackers and timestamp is not None and timestamp != last_tracked[i]:
+                last_tracked[i] = timestamp
+                began = time.perf_counter()
+                results[i] = [tracker.process(frame, timestamp) for tracker in trackers]
+                track_ms[i] = (time.perf_counter() - began) * 1000
+
+            tiles.append(make_tile(frame, name, meters[i].fps, results[i], track_ms[i]))
 
         cv2.imshow(WINDOW_NAME, tile_grid(tiles))
 
@@ -103,18 +131,24 @@ if __name__ == "__main__":
 
     # python -m bodytracker.viewer                        camera only
     # python -m bodytracker.viewer recordings\test.mp4    camera + one tile per video
+    # Which trackers run (and which body parts) is set in config.toml.
     with open("config.toml", "rb") as f:
-        camera = tomllib.load(f)["camera"]
+        config = tomllib.load(f)
+    camera = config["camera"]
     streams = [CameraStream(camera["name"], camera["width"], camera["height"], camera["fps"])]
     names = [camera["name"]]
     for path in sys.argv[1:]:
         streams.append(VideoFileStream(path))
         names.append(Path(path).name)
+    trackers_per_stream = [trackers_from_config(config) for _ in streams]
 
     for stream in streams:
         stream.start()
     try:
-        show_streams(streams, names)
+        show_streams(streams, names, trackers_per_stream)
     finally:
         for stream in streams:
             stream.stop()
+        for trackers in trackers_per_stream:
+            for tracker in trackers:
+                tracker.close()
