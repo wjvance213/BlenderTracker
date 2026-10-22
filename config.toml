@@ -32,3 +32,11 @@ model = "models/pose_landmarker_full.task"
 parts = ["head", "shoulders", "arms"]
 # Drop points whose visibility (0-1: how sure the model is it can see them) is below this.
 min_visibility = 0.5
+
+[smoothing]
+# One Euro filter on every point (see project_planning/smoothing.html).
+# enabled = whether the viewer starts smoothed; press s in the viewer to flip it.
+enabled = true
+# Lower min_cutoff = steadier when still. Higher beta = less lag when moving fast.
+min_cutoff = 0.5
+beta = 4.0

@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from bodytracker.camera import CameraStream, VideoFileStream
+from bodytracker.one_euro import KeypointSmoother
 from bodytracker.overlay import draw_result
 from bodytracker.trackers import trackers_from_config
 
@@ -51,7 +52,7 @@ def _draw_label(image, text, position):
     cv2.putText(image, text, position, font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def make_tile(frame, name, fps, results=(), track_ms=None):
+def make_tile(frame, name, fps, results=(), track_ms=None, smooth_on=None):
     """Return a TILE_WIDTH x TILE_HEIGHT image of `frame` with tracking results, name and fps on top."""
     if frame is None:
         tile = np.zeros((TILE_HEIGHT, TILE_WIDTH, 3), dtype=np.uint8)
@@ -65,6 +66,8 @@ def make_tile(frame, name, fps, results=(), track_ms=None):
     label = f"{name}  {fps:.1f} fps"
     if track_ms is not None:
         label += f"  track {track_ms:.0f} ms"
+    if smooth_on is not None:
+        label += "  [s] smooth" if smooth_on else "  [s] RAW"
     _draw_label(tile, label, (10, 25))
     return tile
 
@@ -81,18 +84,26 @@ def tile_grid(tiles):
     return np.vstack(rows)
 
 
-def show_streams(streams, names, trackers_per_stream=None):
+def show_streams(streams, names, trackers_per_stream=None, smoothing=None):
     """Show all streams in one window until q, Esc, or the window's X is pressed.
 
     trackers_per_stream holds one list of trackers for each stream (each stream needs its
     own, because MediaPipe's video mode remembers the previous frame it was given).
+    smoothing is the config's [smoothing] section; s switches between smoothed and raw.
     """
     if trackers_per_stream is None:
         trackers_per_stream = [[] for _ in streams]
+    if smoothing is None:
+        smoothing = {"enabled": False, "min_cutoff": 0.5, "beta": 4.0}
+    smooth_on = smoothing["enabled"]
+    # One smoother per tracker per stream, for the same reason as the trackers.
+    smoothers = [[KeypointSmoother(smoothing["min_cutoff"], smoothing["beta"]) for _ in trackers]
+                 for trackers in trackers_per_stream]
     meters = [FpsMeter() for _ in streams]
-    # Per stream: the timestamp last tracked, its results, and how long tracking took.
+    # Per stream: the timestamp last tracked, its raw and smoothed results, and how long tracking took.
     last_tracked = [None for _ in streams]
-    results = [[] for _ in streams]
+    raw_results = [[] for _ in streams]
+    smooth_results = [[] for _ in streams]
     track_ms = [None for _ in streams]
 
     while True:
@@ -106,10 +117,14 @@ def show_streams(streams, names, trackers_per_stream=None):
             if trackers and timestamp is not None and timestamp != last_tracked[i]:
                 last_tracked[i] = timestamp
                 began = time.perf_counter()
-                results[i] = [tracker.process(frame, timestamp) for tracker in trackers]
+                raw_results[i] = [tracker.process(frame, timestamp) for tracker in trackers]
                 track_ms[i] = (time.perf_counter() - began) * 1000
+                # Smooth every frame, even while showing raw, so pressing s never makes
+                # the filters jump to catch up.
+                smooth_results[i] = [smoother.smooth(result) for smoother, result in zip(smoothers[i], raw_results[i])]
 
-            tiles.append(make_tile(frame, name, meters[i].fps, results[i], track_ms[i]))
+            shown = smooth_results[i] if smooth_on else raw_results[i]
+            tiles.append(make_tile(frame, name, meters[i].fps, shown, track_ms[i], smooth_on if trackers else None))
 
         cv2.imshow(WINDOW_NAME, tile_grid(tiles))
 
@@ -118,6 +133,8 @@ def show_streams(streams, names, trackers_per_stream=None):
         key = cv2.waitKey(1) & 0xFF
         if key in (ord("q"), 27):  # 27 = Esc
             break
+        if key == ord("s"):
+            smooth_on = not smooth_on
         if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
             break  # window closed with its X button
 
@@ -145,7 +162,7 @@ if __name__ == "__main__":
     for stream in streams:
         stream.start()
     try:
-        show_streams(streams, names, trackers_per_stream)
+        show_streams(streams, names, trackers_per_stream, config["smoothing"])
     finally:
         for stream in streams:
             stream.stop()

@@ -6,6 +6,8 @@ Input in Interactive Systems" (CHI 2012).
 
 import math
 
+from bodytracker.results import Keypoint, TrackResult
+
 
 def _alpha(cutoff, dt):
     """How much of the new value to keep (0-1) for a low-pass filter at `cutoff` Hz.
@@ -63,6 +65,38 @@ class OneEuroFilter:
         self._value = a * value + (1 - a) * self._value
         self._timestamp = timestamp
         return self._value
+
+
+class KeypointSmoother:
+    """Smooth every point of one tracker's results over time: a OneEuroFilter per point per axis.
+
+    Use one smoother per tracker per stream, since its filters remember that tracker's past points.
+    """
+
+    def __init__(self, min_cutoff=0.5, beta=4.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self._filters = {}  # point name -> (x filter, y filter, z filter)
+
+    def smooth(self, result):
+        """Return a new TrackResult with every point smoothed. `result` itself isn't changed."""
+        # Points missing from this frame lose their filters, so when they come back they
+        # start fresh where they reappear instead of gliding in from where they vanished.
+        self._filters = {name: filters for name, filters in self._filters.items() if name in result.keypoints}
+
+        smoothed = TrackResult(result.source, result.timestamp)
+        for name, point in result.keypoints.items():
+            if name not in self._filters:
+                self._filters[name] = tuple(OneEuroFilter(self.min_cutoff, self.beta) for _ in range(3))
+            filter_x, filter_y, filter_z = self._filters[name]
+            t = result.timestamp
+            smoothed.keypoints[name] = Keypoint(
+                filter_x.filter(point.x, t),
+                filter_y.filter(point.y, t),
+                filter_z.filter(point.z, t),
+                point.confidence,  # confidence isn't smoothed: it describes this frame
+            )
+        return smoothed
 
 
 if __name__ == "__main__":
