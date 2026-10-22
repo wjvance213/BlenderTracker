@@ -16,6 +16,10 @@ TILE_WIDTH = 640
 TILE_HEIGHT = 360
 COLUMNS = 2  # tiles per row before wrapping to a new row
 
+# Trackbars only hold whole numbers, so they store min_cutoff x100 and beta x10.
+TRACKBAR_MIN_CUTOFF = "min_cutoff x100"
+TRACKBAR_BETA = "beta x10"
+
 
 class FpsMeter:
     """Count new frames and turn the count into frames per second every `interval` seconds."""
@@ -106,6 +110,16 @@ def show_streams(streams, names, trackers_per_stream=None, smoothing=None):
     smooth_results = [[] for _ in streams]
     track_ms = [None for _ in streams]
 
+    # Trackbars (sliders) have to belong to a window, so create the window up front.
+    cv2.namedWindow(WINDOW_NAME)
+    has_trackers = any(trackers_per_stream)
+    params = (smoothing["min_cutoff"], smoothing["beta"])
+    if has_trackers:
+        # The last argument is a callback for every change; we read the sliders in the loop instead.
+        cv2.createTrackbar(TRACKBAR_MIN_CUTOFF, WINDOW_NAME, round(params[0] * 100), 500, lambda value: None)
+        cv2.createTrackbar(TRACKBAR_BETA, WINDOW_NAME, round(params[1] * 10), 400, lambda value: None)
+        print("Drag the sliders to tune smoothing; copy values you like into config.toml [smoothing].")
+
     while True:
         tiles = []
         for i, (stream, name, trackers) in enumerate(zip(streams, names, trackers_per_stream)):
@@ -137,6 +151,17 @@ def show_streams(streams, names, trackers_per_stream=None, smoothing=None):
             smooth_on = not smooth_on
         if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
             break  # window closed with its X button
+
+        if has_trackers:
+            # A min_cutoff of 0 would divide by zero inside the filter, so the slider's floor is 0.01.
+            new_params = (max(1, cv2.getTrackbarPos(TRACKBAR_MIN_CUTOFF, WINDOW_NAME)) / 100,
+                          cv2.getTrackbarPos(TRACKBAR_BETA, WINDOW_NAME) / 10)
+            if new_params != params:
+                params = new_params
+                for stream_smoothers in smoothers:
+                    for smoother in stream_smoothers:
+                        smoother.set_params(*params)
+                print(f"min_cutoff = {params[0]:.2f}   beta = {params[1]:.1f}")
 
     cv2.destroyAllWindows()
 

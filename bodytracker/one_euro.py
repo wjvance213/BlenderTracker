@@ -78,6 +78,15 @@ class KeypointSmoother:
         self.beta = beta
         self._filters = {}  # point name -> (x filter, y filter, z filter)
 
+    def set_params(self, min_cutoff, beta):
+        """Change the smoothing while running. Existing filters keep their history, so nothing jumps."""
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        for filters in self._filters.values():
+            for one_filter in filters:
+                one_filter.min_cutoff = min_cutoff
+                one_filter.beta = beta
+
     def smooth(self, result):
         """Return a new TrackResult with every point smoothed. `result` itself isn't changed."""
         # Points missing from this frame lose their filters, so when they come back they
