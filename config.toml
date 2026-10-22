@@ -15,9 +15,20 @@ host = "127.0.0.1"
 port = 9100
 
 [hands]
+enabled = true
 # MediaPipe hand model, downloaded into models/ (git-ignored).
 model = "models/hand_landmarker.task"
 num_hands = 2
 # Swap MediaPipe's Left/Right labels. Tested live on the Brio 101: false gives the
 # right answer (your left hand = "left_hand"). Flip it if a camera gets them backwards.
 swap_handedness = false
+
+[body]
+enabled = true
+# MediaPipe pose model, downloaded into models/ (git-ignored).
+model = "models/pose_landmarker_full.task"
+# Which body parts to track. Choose from: head, shoulders, arms, hips, legs, feet.
+# Leave out parts your camera can't fit in view.
+parts = ["head", "shoulders", "arms"]
+# Drop points whose visibility (0-1: how sure the model is it can see them) is below this.
+min_visibility = 0.5

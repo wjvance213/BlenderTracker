@@ -1,6 +1,6 @@
 # Body Tracker
 
-Tracks hands, head and feet from a webcam with MediaPipe, smooths the points with a
+Tracks hands and the body parts you choose from a webcam with MediaPipe, smooths the points with a
 One Euro filter, and streams them over UDP to a Blender add-on that moves empties/bones.
 
 ```
