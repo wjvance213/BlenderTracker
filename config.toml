@@ -13,3 +13,11 @@ fps = 30
 # Where the Blender add-on listens. 127.0.0.1 = this same PC.
 host = "127.0.0.1"
 port = 9100
+
+[hands]
+# MediaPipe hand model, downloaded into models/ (git-ignored).
+model = "models/hand_landmarker.task"
+num_hands = 2
+# Swap MediaPipe's Left/Right labels. Tested live on the Brio 101: false gives the
+# right answer (your left hand = "left_hand"). Flip it if a camera gets them backwards.
+swap_handedness = false
