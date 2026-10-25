@@ -1,0 +1,17 @@
+# Tells Blender (4.2+) what this extension is. Replaces the old bl_info dictionary.
+schema_version = "1.0.0"
+
+id = "body_tracker"
+version = "0.1.0"
+name = "Body Tracker"
+tagline = "Move objects with live points from the Body Tracker app"
+maintainer = "wjvance213"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+# Extensions must say what they need. Blender shows this text when someone installs it.
+[permissions]
+network = "Receive tracking points over UDP"
