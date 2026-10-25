@@ -6,7 +6,8 @@ nothing from the bodytracker package can be imported here.
 Start listens for packets (the panel shows packet rate, seq and lost/late/bad counts, like
 tools/udp_listener.py) and every point in the newest packet moves an empty named
 "BT <point name>" in the "BodyTracker" collection. Points missing from a packet (or below
-the minimum confidence) are hidden or frozen. Open it with N in the 3D viewport,
+the minimum confidence) are hidden or frozen. Build Rig makes a stick-figure armature
+whose bones stretch between the empties. Open it with N in the 3D viewport,
 tab "Body Tracker".
 """
 
@@ -15,6 +16,7 @@ import socket
 import time
 
 import bpy
+from mathutils import Vector
 
 PACKET_VERSION = 1    # must match bodytracker/packet.py
 POLL_INTERVAL = 1 / 60  # seconds between socket checks: twice the camera's 30 fps, so little waiting
@@ -24,6 +26,51 @@ NAME_PREFIX = "BT "
 ASPECT = 9 / 16       # image height / width: y covers fewer pixels than x (1280x720)
 HAND_SIZE = 0.01      # empty sphere radius in metres; small so fingers don't merge
 BODY_SIZE = 0.03
+RIG_NAME = "BodyTracker Rig"  # must NOT start with NAME_PREFIX, or it'd be hidden like a missing point
+
+# The bones, copied from bodytracker/overlay.py's BONES (the add-on can't import it), so
+# the rig matches what the viewer draws. Each bone is (name, start point, end point).
+HAND_POINT_NAMES = (
+    "wrist",
+    "thumb_cmc", "thumb_mcp", "thumb_ip", "thumb_tip",
+    "index_finger_mcp", "index_finger_pip", "index_finger_dip", "index_finger_tip",
+    "middle_finger_mcp", "middle_finger_pip", "middle_finger_dip", "middle_finger_tip",
+    "ring_finger_mcp", "ring_finger_pip", "ring_finger_dip", "ring_finger_tip",
+    "pinky_mcp", "pinky_pip", "pinky_dip", "pinky_tip",
+)
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),            # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),            # index finger
+    (5, 9), (9, 10), (10, 11), (11, 12),       # middle finger
+    (9, 13), (13, 14), (14, 15), (15, 16),     # ring finger
+    (13, 17), (0, 17), (17, 18), (18, 19), (19, 20),  # pinky and palm edge
+)
+
+
+def _rig_bones():
+    bones = [
+        ("shoulder_line", "shoulders.left_shoulder", "shoulders.right_shoulder"),
+        ("hip_line", "hips.left_hip", "hips.right_hip"),
+    ]
+    for side in ("left", "right"):
+        bones += [
+            (f"{side}_upper_arm", f"shoulders.{side}_shoulder", f"arms.{side}_elbow"),
+            (f"{side}_forearm", f"arms.{side}_elbow", f"arms.{side}_wrist"),
+            (f"{side}_torso", f"shoulders.{side}_shoulder", f"hips.{side}_hip"),
+            (f"{side}_thigh", f"hips.{side}_hip", f"legs.{side}_knee"),
+            (f"{side}_shin", f"legs.{side}_knee", f"legs.{side}_ankle"),
+            (f"{side}_heel", f"legs.{side}_ankle", f"feet.{side}_heel"),
+            (f"{side}_foot", f"feet.{side}_heel", f"feet.{side}_foot_index"),
+            (f"{side}_instep", f"legs.{side}_ankle", f"feet.{side}_foot_index"),
+        ]
+    for side in ("left", "right"):
+        for a, b in HAND_CONNECTIONS:
+            name_a, name_b = HAND_POINT_NAMES[a], HAND_POINT_NAMES[b]
+            bones.append((f"{side}_hand.{name_a}>{name_b}", f"{side}_hand.{name_a}", f"{side}_hand.{name_b}"))
+    return bones
+
+
+RIG_BONES = _rig_bones()
 
 
 def read_packet(data):
@@ -167,6 +214,24 @@ def _apply_packet(packet, scene):
         for obj in collection.objects:
             if obj.name.startswith(NAME_PREFIX) and obj.name not in seen:
                 _set_hidden(obj, True)
+    _hide_rig_bones()
+
+
+def _hide_rig_bones():
+    """Hide each rig bone whose start or end empty is hidden, so bones match the dots."""
+    rig = bpy.data.objects.get(RIG_NAME)
+    if rig is None:
+        return
+    for name, a, b in RIG_BONES:
+        pose_bone = rig.pose.bones.get(name)
+        if pose_bone is None:
+            continue  # not built: its points hadn't been seen when Build Rig was clicked
+        ends = (bpy.data.objects.get(NAME_PREFIX + a), bpy.data.objects.get(NAME_PREFIX + b))
+        hidden = any(end is None or end.hide_viewport for end in ends)
+        # Blender 5 keeps bone visibility on the pose bone; set the Bone's too to be safe.
+        if pose_bone.hide != hidden:
+            pose_bone.hide = hidden
+            pose_bone.bone.hide = hidden
 
 
 def _set_hidden(obj, hidden):
@@ -243,6 +308,67 @@ class BODYTRACKER_OT_stop(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class BODYTRACKER_OT_build_rig(bpy.types.Operator):
+    """Build a stick-figure armature whose bones stretch between the empties (replaces an old one)"""
+
+    bl_idname = "bodytracker.build_rig"
+    bl_label = "Build Rig"
+
+    def execute(self, context):
+        objects = bpy.data.objects
+        # Only bones whose two points have been seen (their empties exist).
+        bones = [(name, objects[NAME_PREFIX + a], objects[NAME_PREFIX + b]) for name, a, b in RIG_BONES
+                 if NAME_PREFIX + a in objects and NAME_PREFIX + b in objects]
+        if not bones:
+            self.report({"WARNING"}, "No points yet: Start, run the viewer and show yourself to the camera first")
+            return {"CANCELLED"}
+
+        if context.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        old = objects.get(RIG_NAME)
+        if old is not None:
+            old_data = old.data
+            objects.remove(old)
+            if old_data.users == 0:
+                bpy.data.armatures.remove(old_data)
+
+        armature = bpy.data.armatures.new(RIG_NAME)
+        armature.display_type = "STICK"
+        rig = objects.new(RIG_NAME, armature)
+        rig.show_in_front = True  # draw over the empties
+        _get_collection().objects.link(rig)
+
+        # Bones can only be added in Edit Mode (as "edit bones"), and mode_set works on the
+        # active object, so make the rig active first.
+        context.view_layer.objects.active = rig
+        bpy.ops.object.mode_set(mode="EDIT")
+        lengths = {}
+        for name, start, end in bones:
+            edit_bone = armature.edit_bones.new(name)
+            edit_bone.head = start.location
+            edit_bone.tail = end.location
+            if edit_bone.length < 0.001:
+                # Blender deletes zero-length bones when leaving Edit Mode, so give it some length.
+                edit_bone.tail = edit_bone.head + Vector((0, 0, 0.05))
+            lengths[name] = edit_bone.length
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        # Each bone: its root sits on the start empty and it stretches to reach the end empty.
+        # No parents on purpose: every bone follows its own two empties, so nothing fights.
+        for name, start, end in bones:
+            pose_bone = rig.pose.bones[name]
+            copy = pose_bone.constraints.new("COPY_LOCATION")
+            copy.target = start
+            stretch = pose_bone.constraints.new("STRETCH_TO")
+            stretch.target = end
+            stretch.rest_length = lengths[name]  # scale 1 at the length it was built with
+            stretch.volume = "NO_VOLUME"         # stay the same thickness when stretched
+        _hide_rig_bones()
+
+        self.report({"INFO"}, f"Built {RIG_NAME} with {len(bones)} bones")
+        return {"FINISHED"}
+
+
 class BODYTRACKER_PT_panel(bpy.types.Panel):
     """The Body Tracker tab in the 3D viewport's sidebar (press N)."""
 
@@ -267,6 +393,7 @@ class BODYTRACKER_PT_panel(bpy.types.Panel):
         layout.prop(scene, "bodytracker_min_confidence")
         # expand=True draws the choices as side-by-side toggle buttons instead of a dropdown.
         layout.row().prop(scene, "bodytracker_missing", expand=True)
+        layout.operator(BODYTRACKER_OT_build_rig.bl_idname, icon="ARMATURE_DATA")
         layout.separator()
 
         if _receiver is None:
@@ -283,7 +410,7 @@ class BODYTRACKER_PT_panel(bpy.types.Panel):
         col.label(text=f"{len(_receiver.packet['points'])} points")
 
 
-CLASSES = (BODYTRACKER_OT_start, BODYTRACKER_OT_stop, BODYTRACKER_PT_panel)
+CLASSES = (BODYTRACKER_OT_start, BODYTRACKER_OT_stop, BODYTRACKER_OT_build_rig, BODYTRACKER_PT_panel)
 
 
 def register():
