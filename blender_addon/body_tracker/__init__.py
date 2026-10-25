@@ -3,9 +3,10 @@
 Self-contained on purpose: Blender's Python has only the standard library and bpy, so
 nothing from the bodytracker package can be imported here.
 
-Step 2 (this version): Start listens for packets and the panel shows packet rate, seq and
-lost/late/bad counts, like tools/udp_listener.py. Nothing in the scene moves yet.
-Open it with N in the 3D viewport, tab "Body Tracker".
+Start listens for packets (the panel shows packet rate, seq and lost/late/bad counts, like
+tools/udp_listener.py) and every point in the newest packet moves an empty named
+"BT <point name>" in the "BodyTracker" collection. Open it with N in the 3D viewport,
+tab "Body Tracker".
 """
 
 import json
@@ -16,6 +17,13 @@ import bpy
 
 PACKET_VERSION = 1    # must match bodytracker/packet.py
 POLL_INTERVAL = 1 / 60  # seconds between socket checks: twice the camera's 30 fps, so little waiting
+
+COLLECTION_NAME = "BodyTracker"
+NAME_PREFIX = "BT "
+SCALE = 2.0           # Blender metres for the image's full width
+ASPECT = 9 / 16       # image height / width: y covers fewer pixels than x (1280x720)
+HAND_SIZE = 0.01      # empty sphere radius in metres; small so fingers don't merge
+BODY_SIZE = 0.03
 
 
 def read_packet(data):
@@ -43,7 +51,8 @@ class Receiver:
         # Non-blocking: recvfrom returns straight away (raising BlockingIOError if nothing is
         # waiting) instead of freezing Blender until a packet arrives.
         self.sock.setblocking(False)
-        self.packet = None   # the newest packet; step 3 moves empties from it
+        self.packet = None   # the newest packet
+        self.new_packet = False  # True when self.packet hasn't been applied to the scene yet
         self.last_seq = None
         self.lost = self.late = self.bad = 0
         self.rate = 0.0
@@ -85,6 +94,7 @@ class Receiver:
             self.last_seq = seq
             self._count += 1
             self.packet = packet
+            self.new_packet = True
         else:
             self.late += 1
 
@@ -105,11 +115,55 @@ def _redraw_panels():
                 area.tag_redraw()
 
 
+def to_blender(x, y, z):
+    """Image coordinates (0-1, y down, z = depth) -> Blender location (Z up, -Y toward the viewer).
+
+    Your left hand is on the image's right (bigger x), so it lands at +X: like a character
+    facing you in Front view, which is how Blender rigs are set up.
+    """
+    return ((x - 0.5) * SCALE,
+            z * SCALE,                       # smaller z = closer to the camera = toward you
+            (0.5 - y) * SCALE * ASPECT)      # flip y so up is up
+
+
+def _get_collection():
+    """The BodyTracker collection, created and linked to the scene if it's missing."""
+    collection = bpy.data.collections.get(COLLECTION_NAME)
+    if collection is None:
+        collection = bpy.data.collections.new(COLLECTION_NAME)
+    scene_root = bpy.context.scene.collection
+    if scene_root.children.get(collection.name) is None:
+        scene_root.children.link(collection)
+    return collection
+
+
+def _apply_packet(packet):
+    """Move one empty per point in the packet, creating any that don't exist yet."""
+    collection = _get_collection()
+    for name, (x, y, z, _confidence) in packet["points"].items():
+        # Look the empty up by name every time instead of keeping a reference: after
+        # undo or a delete, an old reference points at nothing, while a lookup just
+        # finds nothing and makes a new one.
+        object_name = NAME_PREFIX + name
+        obj = bpy.data.objects.get(object_name)
+        if obj is None:
+            obj = bpy.data.objects.new(object_name, None)  # None = no mesh data, so an empty
+            obj.empty_display_type = "SPHERE"
+            obj.empty_display_size = HAND_SIZE if name.split(".")[0].endswith("_hand") else BODY_SIZE
+            collection.objects.link(obj)
+        obj.location = to_blender(x, y, z)
+
+
 def _poll():
     """bpy.app.timers calls this on Blender's main thread, where touching bpy is safe."""
     if _receiver is None:
         return None  # returning None stops the timer
-    if _receiver.poll():
+    stats_changed = _receiver.poll()
+    # The timer runs at 60 Hz but packets come at ~30, so only move things for a new one.
+    if _receiver.new_packet:
+        _receiver.new_packet = False
+        _apply_packet(_receiver.packet)
+    if stats_changed:
         _redraw_panels()
     return POLL_INTERVAL  # returning a number = "call me again in this many seconds"
 
