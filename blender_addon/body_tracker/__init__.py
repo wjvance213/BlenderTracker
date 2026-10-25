@@ -5,7 +5,8 @@ nothing from the bodytracker package can be imported here.
 
 Start listens for packets (the panel shows packet rate, seq and lost/late/bad counts, like
 tools/udp_listener.py) and every point in the newest packet moves an empty named
-"BT <point name>" in the "BodyTracker" collection. Open it with N in the 3D viewport,
+"BT <point name>" in the "BodyTracker" collection. Points missing from a packet (or below
+the minimum confidence) are hidden or frozen. Open it with N in the 3D viewport,
 tab "Body Tracker".
 """
 
@@ -20,7 +21,6 @@ POLL_INTERVAL = 1 / 60  # seconds between socket checks: twice the camera's 30 f
 
 COLLECTION_NAME = "BodyTracker"
 NAME_PREFIX = "BT "
-SCALE = 2.0           # Blender metres for the image's full width
 ASPECT = 9 / 16       # image height / width: y covers fewer pixels than x (1280x720)
 HAND_SIZE = 0.01      # empty sphere radius in metres; small so fingers don't merge
 BODY_SIZE = 0.03
@@ -115,15 +115,16 @@ def _redraw_panels():
                 area.tag_redraw()
 
 
-def to_blender(x, y, z):
+def to_blender(x, y, z, scale):
     """Image coordinates (0-1, y down, z = depth) -> Blender location (Z up, -Y toward the viewer).
 
     Your left hand is on the image's right (bigger x), so it lands at +X: like a character
-    facing you in Front view, which is how Blender rigs are set up.
+    facing you in Front view, which is how Blender rigs are set up. scale = Blender metres
+    for the image's full width.
     """
-    return ((x - 0.5) * SCALE,
-            z * SCALE,                       # smaller z = closer to the camera = toward you
-            (0.5 - y) * SCALE * ASPECT)      # flip y so up is up
+    return ((x - 0.5) * scale,
+            z * scale,                       # smaller z = closer to the camera = toward you
+            (0.5 - y) * scale * ASPECT)      # flip y so up is up
 
 
 def _get_collection():
@@ -137,10 +138,17 @@ def _get_collection():
     return collection
 
 
-def _apply_packet(packet):
-    """Move one empty per point in the packet, creating any that don't exist yet."""
+def _apply_packet(packet, scene):
+    """Move one empty per point in the packet, creating any that don't exist yet.
+
+    Empties whose point is missing (or below the minimum confidence) are hidden or left
+    where they were, depending on the panel's Missing points setting.
+    """
     collection = _get_collection()
-    for name, (x, y, z, _confidence) in packet["points"].items():
+    seen = set()
+    for name, (x, y, z, confidence) in packet["points"].items():
+        if confidence < scene.bodytracker_min_confidence:
+            continue
         # Look the empty up by name every time instead of keeping a reference: after
         # undo or a delete, an old reference points at nothing, while a lookup just
         # finds nothing and makes a new one.
@@ -151,7 +159,21 @@ def _apply_packet(packet):
             obj.empty_display_type = "SPHERE"
             obj.empty_display_size = HAND_SIZE if name.split(".")[0].endswith("_hand") else BODY_SIZE
             collection.objects.link(obj)
-        obj.location = to_blender(x, y, z)
+        obj.location = to_blender(x, y, z, scene.bodytracker_scale)
+        _set_hidden(obj, False)
+        seen.add(object_name)
+
+    if scene.bodytracker_missing == "HIDE":
+        for obj in collection.objects:
+            if obj.name.startswith(NAME_PREFIX) and obj.name not in seen:
+                _set_hidden(obj, True)
+
+
+def _set_hidden(obj, hidden):
+    """Hide or show an empty (the Outliner's monitor icon). The empty keeps its last location."""
+    # Only write when it changes: every write makes Blender re-evaluate the scene.
+    if obj.hide_viewport != hidden:
+        obj.hide_viewport = hidden
 
 
 def _poll():
@@ -162,7 +184,7 @@ def _poll():
     # The timer runs at 60 Hz but packets come at ~30, so only move things for a new one.
     if _receiver.new_packet:
         _receiver.new_packet = False
-        _apply_packet(_receiver.packet)
+        _apply_packet(_receiver.packet, bpy.context.scene)
     if stats_changed:
         _redraw_panels()
     return POLL_INTERVAL  # returning a number = "call me again in this many seconds"
@@ -239,6 +261,14 @@ class BODYTRACKER_PT_panel(bpy.types.Panel):
         row.operator(BODYTRACKER_OT_start.bl_idname, icon="PLAY")
         row.operator(BODYTRACKER_OT_stop.bl_idname, icon="SNAP_FACE")
 
+        layout.separator()
+        layout.label(text="Points")
+        layout.prop(scene, "bodytracker_scale")
+        layout.prop(scene, "bodytracker_min_confidence")
+        # expand=True draws the choices as side-by-side toggle buttons instead of a dropdown.
+        layout.row().prop(scene, "bodytracker_missing", expand=True)
+        layout.separator()
+
         if _receiver is None:
             layout.label(text="Stopped", icon="RADIOBUT_OFF")
             return
@@ -265,12 +295,26 @@ def register():
         name="Host", default="127.0.0.1", description="Address to listen on (127.0.0.1 = this PC)")
     bpy.types.Scene.bodytracker_port = bpy.props.IntProperty(
         name="Port", default=9100, min=1, max=65535, description="Must match [udp] port in config.toml")
+    bpy.types.Scene.bodytracker_scale = bpy.props.FloatProperty(
+        name="Scale", default=2.0, min=0.1, soft_max=10.0, unit="LENGTH",
+        description="Blender size of the camera image's full width")
+    bpy.types.Scene.bodytracker_min_confidence = bpy.props.FloatProperty(
+        name="Min confidence", default=0.5, min=0.0, max=1.0,
+        description="Treat points less certain than this as missing")
+    # Each item is (identifier, label shown, tooltip).
+    bpy.types.Scene.bodytracker_missing = bpy.props.EnumProperty(
+        name="Missing points", default="HIDE",
+        items=[("HIDE", "Hide", "Hide a point's empty until the point comes back"),
+               ("FREEZE", "Freeze", "Leave a point's empty where it was last seen")])
 
 
 def unregister():
     """Blender calls this when the add-on is disabled. Undo everything register() did."""
     # Stop first, or the timer would keep running (and the port stay taken) after disabling.
     _stop_receiving()
+    del bpy.types.Scene.bodytracker_missing
+    del bpy.types.Scene.bodytracker_min_confidence
+    del bpy.types.Scene.bodytracker_scale
     del bpy.types.Scene.bodytracker_port
     del bpy.types.Scene.bodytracker_host
     for cls in reversed(CLASSES):
