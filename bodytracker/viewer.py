@@ -9,6 +9,7 @@ import numpy as np
 from bodytracker.camera import CameraStream, VideoFileStream
 from bodytracker.one_euro import KeypointSmoother
 from bodytracker.overlay import draw_result
+from bodytracker.sender import sender_from_config
 from bodytracker.trackers import trackers_from_config
 
 WINDOW_NAME = "Body Tracker"
@@ -56,7 +57,7 @@ def _draw_label(image, text, position):
     cv2.putText(image, text, position, font, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def make_tile(frame, name, fps, results=(), track_ms=None, smooth_on=None):
+def make_tile(frame, name, fps, results=(), track_ms=None, smooth_on=None, sent_seq=None):
     """Return a TILE_WIDTH x TILE_HEIGHT image of `frame` with tracking results, name and fps on top."""
     if frame is None:
         tile = np.zeros((TILE_HEIGHT, TILE_WIDTH, 3), dtype=np.uint8)
@@ -72,6 +73,8 @@ def make_tile(frame, name, fps, results=(), track_ms=None, smooth_on=None):
         label += f"  track {track_ms:.0f} ms"
     if smooth_on is not None:
         label += "  [s] smooth" if smooth_on else "  [s] RAW"
+    if sent_seq is not None:
+        label += f"  sent #{sent_seq}"
     _draw_label(tile, label, (10, 25))
     return tile
 
@@ -88,12 +91,14 @@ def tile_grid(tiles):
     return np.vstack(rows)
 
 
-def show_streams(streams, names, trackers_per_stream=None, smoothing=None):
+def show_streams(streams, names, trackers_per_stream=None, smoothing=None, sender=None):
     """Show all streams in one window until q, Esc, or the window's X is pressed.
 
     trackers_per_stream holds one list of trackers for each stream (each stream needs its
     own, because MediaPipe's video mode remembers the previous frame it was given).
     smoothing is the config's [smoothing] section; s switches between smoothed and raw.
+    sender (a UdpSender) gets the first stream's results for every new frame, smoothed or
+    raw to match the screen. Only one stream sends, so Blender never gets two bodies mixed up.
     """
     if trackers_per_stream is None:
         trackers_per_stream = [[] for _ in streams]
@@ -136,9 +141,14 @@ def show_streams(streams, names, trackers_per_stream=None, smoothing=None):
                 # Smooth every frame, even while showing raw, so pressing s never makes
                 # the filters jump to catch up.
                 smooth_results[i] = [smoother.smooth(result) for smoother, result in zip(smoothers[i], raw_results[i])]
+                if sender is not None and i == 0:
+                    sender.send(timestamp, smooth_results[i] if smooth_on else raw_results[i])
 
             shown = smooth_results[i] if smooth_on else raw_results[i]
-            tiles.append(make_tile(frame, name, meters[i].fps, shown, track_ms[i], smooth_on if trackers else None))
+            # sender.seq is the next number to use, so the last one sent is seq - 1.
+            sent_seq = sender.seq - 1 if sender is not None and i == 0 and sender.seq > 0 else None
+            tiles.append(make_tile(frame, name, meters[i].fps, shown, track_ms[i], smooth_on if trackers else None,
+                                   sent_seq))
 
         cv2.imshow(WINDOW_NAME, tile_grid(tiles))
 
@@ -183,12 +193,15 @@ if __name__ == "__main__":
         streams.append(VideoFileStream(path))
         names.append(Path(path).name)
     trackers_per_stream = [trackers_from_config(config) for _ in streams]
+    sender = sender_from_config(config)
+    print(f"Sending the camera's points to {sender.address[0]}:{sender.address[1]}")
 
     for stream in streams:
         stream.start()
     try:
-        show_streams(streams, names, trackers_per_stream, config["smoothing"])
+        show_streams(streams, names, trackers_per_stream, config["smoothing"], sender)
     finally:
+        sender.close()
         for stream in streams:
             stream.stop()
         for trackers in trackers_per_stream:
